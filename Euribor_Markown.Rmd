@@ -1,0 +1,195 @@
+---
+title: "Forecasting EURIBOR 12M with ARIMA using R"
+output: github_document
+---
+
+```{r load_libraries, include=FALSE}
+library(lubridate)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(forecast)
+library(stringr)
+library(here)
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Euribor Arima Forecast
+
+Simple R Markdown that pulls historic 12M EURIBOR rates from https://www.euribor-rates.eu in JSON format and performs an ARIMA (Autoregressive integrated moving average) forecast for the next 180 days.
+
+```{r load_historic_rates_from_csv, include=FALSE}
+
+# Read historic EURIBOR rates already saved in CSV
+csv_ds <- read.csv(here("euribor_rates.csv"), header = TRUE)
+
+# Convert to data.frame
+euribor <- data.frame(
+  ymd(csv_ds$date),
+  as.numeric(csv_ds$rate)
+)
+colnames(euribor) <- c("date", "rate")
+```
+
+```{r fetch_new_rates_from_external_api, include=FALSE}
+# update with more recent rates
+start <- max(euribor$date)
+end <- Sys.Date()-years(2)
+while(start < end) {
+  from <- start
+  to <- from + years(1)
+  
+  if(to > end) 
+    to = end
+ 
+  mintick <- sprintf(as.numeric(as.POSIXct(from))*1000, fmt = '%.0f')
+  maxtick <- sprintf(as.numeric(as.POSIXct(to))*1000, fmt = '%.0f')
+  
+  # print(paste0("Pulling:", from, " - ", to, "   (mintick,maxtick) = (",mintick,",",maxtick,")"))
+  
+  # generate the URL with the proper min and max ticks
+  url <- paste0("https://www.euribor-rates.eu/umbraco/api/euriborpageapi/highchartsdata?minticks=",mintick,"&maxticks=",maxtick,"&series[0]=4")
+
+  # fetch JSON
+  historic_rates = jsonlite::fromJSON(txt=url)
+  df <- data.frame(historic_rates$Data)
+  
+  # bind to historic rates
+  new_rates <- data.frame(
+    as.Date(as.POSIXct(df$X1/1000, origin="1970-01-01", tz = "UTC")),
+    df$X2
+  )
+  colnames(new_rates) <- c("date", "rate")
+  euribor <- rbind(
+    euribor,
+    new_rates
+  )
+  
+  start <- to
+  # sleep for X seconds to keep under the radar
+  #Sys.sleep(15)
+}
+```
+
+```{r update_historic_csv_with_new_rates, include=FALSE}
+# remove duplicates
+euribor <- unique(euribor)
+
+# update historical rates csv
+colnames(euribor) <- c("date", "rate")
+write.csv(euribor, file=here("euribor_rates.csv"), row.names = FALSE)
+
+```
+
+## Preview Historical Rates Dataset
+```{r historical_rates_head_and_tail, echo = FALSE}
+# preview historical data.frame
+head(euribor)
+tail(euribor)
+```
+
+```{r train_arima_and_forecast, include=FALSE}
+# train ARIMA
+arima_fit = auto.arima(ts(euribor)[,2])
+# Forecast for next X days
+days_forecast <- 180
+arima_forecast <- forecast(arima_fit, h=days_forecast)
+# convert result for data.frame
+euribor_forecasted <- data.frame(
+  date <- seq(max(euribor$date)+1, by = "day", length.out = days_forecast),
+  mean <- arima_forecast$mean,
+  lo_80 <- arima_forecast$lower[,1],
+  hi_80 <- arima_forecast$upper[,1],
+  lo_95 <- arima_forecast$lower[,2],
+  hi_95 <- arima_forecast$upper[,2]
+)
+colnames(euribor_forecasted) <- c("date", "forecast", "lo_80", "hi_80", "lo_95", "hi_95")
+
+chartDates <- c(euribor$date, euribor_forecasted$date)
+monthKeys <- my(paste0(str_pad(month(chartDates), 2, pad = "0"), '-', year(chartDates)))
+
+chart_data <- data.frame(
+  series <- c("Historic"),
+  euribor$date,
+  euribor$rate,
+  NA,
+  NA,
+  NA,
+  NA
+)
+colnames(chart_data) <- c("series", "date", "rate", "lo_80", "hi_80", "lo_95", "hi_95")
+
+chart_data <- rbind(
+  chart_data,
+  data.frame(
+    series = c("Forecast"),
+    date = euribor_forecasted$date,
+    rate = euribor_forecasted$forecast,
+    lo_80 = euribor_forecasted$lo_80,
+    hi_80 = euribor_forecasted$hi_80,
+    lo_95 = euribor_forecasted$lo_95,
+    hi_95 = euribor_forecasted$hi_95
+  )
+)
+
+chart_data <- chart_data %>% arrange(desc(date))
+
+min_chart_data <- min(c(chart_data$rate), min(chart_data$lo_80), min(chart_data$lo_95))
+max_chart_data <- max(c(chart_data$rate), max(chart_data$hi_80), max(chart_data$hi_95))
+
+```
+
+
+## Preview Forecast Rates Dataset
+
+
+```{r cars, echo = FALSE}
+# preview data.frame
+head(euribor_forecasted)
+tail(euribor_forecasted)
+```
+
+```{r dates_for_text, include=FALSE, echo = FALSE}
+last_historical_date <- max(euribor$date)
+first_forecast_date <- min(euribor_forecasted$date)
+last_forecast_date <- max(euribor_forecasted$date)
+
+```
+
+Last historic date is `r last_historical_date`, forecast range went from `r first_forecast_date` to `r last_forecast_date`.
+
+## 1 Year Historical + Forecast with 80% & 95% confidence intervals
+```{r one_historical_year_and_forecast_period, fig.width=11,fig.height=6, echo=FALSE}
+ggplot(chart_data %>% filter(date >= max(euribor$date) - years(1)), aes(x=date, y = rate, color = series)) + 
+  geom_line(aes(linetype=series), size = 1) +
+  scale_linetype_manual(values=c("dashed", "solid")) +
+  geom_ribbon(aes(x=date, ymin = lo_80, ymax = hi_80), color = "#4fc92e", size = 1, alpha = 0.1, linetype="dashed") +
+  geom_ribbon(aes(x=date, ymin = lo_95, ymax = hi_95), color = "#c9a22e", size = 1, alpha = 0.1, linetype="dashed") +
+  scale_y_continuous(limits = c(min_chart_data, max_chart_data), breaks = seq(from = -1, to = 6, by = 0.20), name ="Euribor") +
+  scale_x_date(breaks = monthKeys[month(monthKeys) %in% c(1:12) & day(monthKeys) == 1], name ="Date") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+## All Historic Data + Forecast with 95% confidence interval
+```{r all_historic_year_and_forecast_95_confidence_interval, fig.width=11,fig.height=6, echo=FALSE}
+ggplot(chart_data, aes(x=date, y = rate, color = series)) + 
+  geom_line(aes(linetype=series), size = 1) +
+  scale_linetype_manual(values=c("dashed", "solid")) +
+  geom_ribbon(aes(x=date, ymin = lo_95, ymax = hi_95), color = "#c9a22e", size = 1, alpha = 0.1, linetype="dashed") +
+  scale_y_continuous(limits = c(min_chart_data, max_chart_data), breaks = seq(from = -1, to = 6, by = 0.20), name ="Euribor") +
+  scale_x_date(breaks = monthKeys[month(monthKeys) %in% c(1) & day(monthKeys) == 1], name ="Date") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+## All Historic Data + Forecast with 80% confidence interval
+```{r all_historic_year_and_forecast_80_confidence_interval, fig.width=11,fig.height=6, echo=FALSE}
+ggplot(chart_data, aes(x=date, y = rate, color = series)) + 
+  geom_line(aes(linetype=series), size = 1) +
+  scale_linetype_manual(values=c("dashed", "solid")) +
+  geom_ribbon(aes(x=date, ymin = lo_80, ymax = hi_80), color = "#4fc92e", size = 1, alpha = 0.1, linetype="dashed") +
+  scale_y_continuous(limits = c(min_chart_data, max_chart_data), breaks = seq(from = -1, to = 6, by = 0.20), name ="Euribor") +
+  scale_x_date(breaks = monthKeys[month(monthKeys) %in% c(1) & day(monthKeys) == 1], name ="Date") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
