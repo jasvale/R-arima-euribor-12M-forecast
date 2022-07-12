@@ -35,7 +35,7 @@ colnames(euribor) <- c("date", "rate")
 ```{r fetch_new_rates_from_external_api, include=FALSE}
 # update with more recent rates
 start <- max(euribor$date)
-end <- Sys.Date()-years(2)
+end <- Sys.Date()
 while(start < end) {
   from <- start
   to <- from + years(1)
@@ -46,7 +46,7 @@ while(start < end) {
   mintick <- sprintf(as.numeric(as.POSIXct(from))*1000, fmt = '%.0f')
   maxtick <- sprintf(as.numeric(as.POSIXct(to))*1000, fmt = '%.0f')
   
-  # print(paste0("Pulling:", from, " - ", to, "   (mintick,maxtick) = (",mintick,",",maxtick,")"))
+  #print(paste0("Pulling:", from, " - ", to, "   (mintick,maxtick) = (",mintick,",",maxtick,")"))
   
   # generate the URL with the proper min and max ticks
   url <- paste0("https://www.euribor-rates.eu/umbraco/api/euriborpageapi/highchartsdata?minticks=",mintick,"&maxticks=",maxtick,"&series[0]=4")
